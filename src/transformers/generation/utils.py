@@ -2942,7 +2942,7 @@ class GenerationMixin:
                         or nt == eos_token_id        
                     ):
                         evaluated_hypotheses.add(hypo, next_token_scores[0,idx])
-                        next_tokens[0, idx] = eos_token_id
+                        next_tokens[0, idx] = torch.LongTensor(eos_token_id)
                         finished += 1
 
             # stateless
