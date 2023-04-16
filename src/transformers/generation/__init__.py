@@ -86,6 +86,7 @@ else:
         "BeamSampleDecoderOnlyOutput",
         "ContrastiveSearchEncoderDecoderOutput",
         "ContrastiveSearchDecoderOnlyOutput",
+        "EvaluatedHypotheses",
     ]
 
 try:
@@ -207,6 +208,7 @@ if TYPE_CHECKING:
             GreedySearchEncoderDecoderOutput,
             SampleDecoderOnlyOutput,
             SampleEncoderDecoderOutput,
+            EvaluatedHypotheses,
             top_k_top_p_filtering,
         )
 
