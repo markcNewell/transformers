@@ -78,6 +78,48 @@ if TYPE_CHECKING:
 
 logger = logging.get_logger(__name__)
 
+class EvaluatedHypotheses:
+    def __init__(self, reliability_window=99999999, repetition_detection=False) -> None:
+        self.trie = {}
+        self.reliability_window = reliability_window
+        self.repetition_detection = repetition_detection
+        self.to_add = []
+        self.current_max = -float('inf')
+
+    def _get(self, hypo):
+        node = self.trie
+        for token in hypo:
+            if not token in node.keys():
+                return {}
+            node = node[token]
+        return node
+
+    def is_seen(self, hypo):
+        node = self.trie
+        for token in hypo:
+            if not token in node.keys():
+                return False
+            node = node[token]
+        return True
+
+    def add(self, hypo, prob):
+        self.current_max = max(self.current_max, prob)
+        self.to_add.append(hypo)
+
+    def finish_step(self):
+        for hypo in self.to_add:
+            node = self.trie
+            for token in hypo:
+                if not token in node.keys():
+                    node[token] = {}
+                node = node[token]
+        self.to_add = []
+        self.current_max = -float('inf')      
+
+    def trim(self, prefix, head=None):
+        self.trie = self._get(prefix)
+        if head is not None:
+            self.trie = {head: self.trie}
 
 @dataclass
 class GreedySearchDecoderOnlyOutput(ModelOutput):
@@ -1554,6 +1596,7 @@ class GenerationMixin:
                 output_scores=generation_config.output_scores,
                 return_dict_in_generate=generation_config.return_dict_in_generate,
                 synced_gpus=synced_gpus,
+                evaluated_hypotheses=generation_config.evaluated_hypotheses,
                 **model_kwargs,
             )
 
@@ -2647,6 +2690,7 @@ class GenerationMixin:
         output_scores: Optional[bool] = None,
         return_dict_in_generate: Optional[bool] = None,
         synced_gpus: Optional[bool] = False,
+        evaluated_hypotheses: Optional[EvaluatedHypotheses] = None,
         **model_kwargs,
     ) -> Union[BeamSearchOutput, torch.LongTensor]:
         r"""
@@ -2882,6 +2926,25 @@ class GenerationMixin:
             next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
             next_tokens = next_tokens % vocab_size
 
+            finished = 0
+            if evaluated_hypotheses is not None:
+                tokens = input_ids[next_indices[0, :]].cpu().numpy()
+                ntokens = next_tokens[0].cpu().numpy()
+                for idx, (nt, toks) in enumerate(zip(ntokens, tokens)):
+                    hypo = toks + [nt,]
+                    if (
+                        (
+                            evaluated_hypotheses.repetition_detection 
+                            and nt in toks 
+                            and not evaluated_hypotheses.is_seen(hypo)
+                        )
+                        or next_token_scores[0,idx] <= evaluated_hypotheses.current_max     
+                        or nt == eos_token_id        
+                    ):
+                        evaluated_hypotheses.add(hypo, next_token_scores[0,idx])
+                        next_tokens[0, idx] = torch.LongTensor(eos_token_id)
+                        finished += 1
+
             # stateless
             beam_outputs = beam_scorer.process(
                 input_ids,
@@ -2891,6 +2954,7 @@ class GenerationMixin:
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
                 beam_indices=beam_indices,
+                force_finish=finished > 0,
             )
 
             beam_scores = beam_outputs["next_beam_scores"]
@@ -2911,7 +2975,7 @@ class GenerationMixin:
             # increase cur_len
             cur_len = cur_len + 1
 
-            if beam_scorer.is_done or stopping_criteria(input_ids, scores):
+            if beam_scorer.is_done or stopping_criteria(input_ids, scores) or finished >= num_beams:
                 if not synced_gpus:
                     break
                 else:
